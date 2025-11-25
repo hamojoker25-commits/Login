@@ -39,11 +39,10 @@ def connect_google_sheet():
 def init_sheet(sheet):
     try:
         worksheet = sheet.worksheet(MAIN_WORKSHEET_NAME)
-        # التأكد من وجود عمود الرابط في الشيت نفسه لو مش موجود
+        # التأكد من وجود عمود Link في الرئيسي احتياطياً
         headers = worksheet.row_values(1)
         if "Link" not in headers:
-            # لو العمود مش موجود، نضيفه في الخلية رقم 9 في الصف الأول
-            worksheet.update_cell(1, 9, "Link")
+            worksheet.update_cell(1, len(headers)+1, "Link")
     except:
         worksheet = sheet.add_worksheet(title=MAIN_WORKSHEET_NAME, rows="1000", cols="20")
         worksheet.append_row(["User_Code", "First_Name", "Second_Name", "Email", "Password", "DOB", "Age", "Created_At", "Link"])
@@ -78,19 +77,19 @@ def save_new_user(f_name, s_name, email, password, dob, age, user_link):
         if user_code not in existing_codes:
             break
             
-    # تنظيف الرابط
     if not user_link:
         user_link = ""
     
     ws_main.append_row([user_code, f_name, s_name, email, password, str(dob), age, str(datetime.now()), user_link])
     
-    # محاولة إنشاء شيت فرعي (اختياري)
+    # إنشاء الشيت الخاص فوراً
     try:
         try:
             sheet.worksheet(user_code)
         except:
             ws_user = sheet.add_worksheet(title=user_code, rows="100", cols="10")
-            ws_user.append_row(["بيانات خاصة بالمستخدم", "ملاحظات", "التاريخ"])
+            # هنا بنجهز العناوين في الشيت الخاص عشان يكون جاهز
+            ws_user.append_row(["الموضوع", "ملاحظات", "التاريخ", "Link"]) 
     except:
         pass
         
@@ -119,7 +118,7 @@ def verify_login(user_code, password):
 # --- الواجهة ---
 
 def main():
-    st.title("نظام التسجيل (Google Sheets) 🌐")
+    st.title("بوابة المستخدمين 🌐")
 
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
@@ -127,75 +126,99 @@ def main():
 
     if st.session_state['logged_in']:
         user = st.session_state['user_data']
-        st.success(f"مرحباً بك، {user['First_Name']}!")
         
-        col1, col2 = st.columns(2)
-        col1.metric("كود المستخدم", user['User_Code'])
-        col2.metric("العمر", user['Age'])
+        # 1. عرض ترحيب بسيط (Metrics)
+        st.success(f"أهلاً بك: {user['First_Name']} {user['Second_Name']}")
         
-        st.divider()
-        st.subheader("📋 بياناتك المسجلة")
-        
-        # تجهيز البيانات للعرض
-        my_info = pd.DataFrame([user])
-        
-        # --- (الحل الجذري للمشكلة) ---
-        # 1. التأكد إن العمود موجود
-        if "Link" not in my_info.columns:
-            my_info["Link"] = None
-            
-        # 2. تنظيف البيانات: أي خانة فاضية أو كلمة nan نحولها لـ None حقيقي
-        def clean_link(val):
-            if val is None: return None
-            s = str(val).strip()
-            if s == "" or s.lower() == "nan" or s.lower() == "none":
-                return None
-            return s
-
-        my_info["Link"] = my_info["Link"].apply(clean_link)
-
-        # 3. العرض الآمن (Try/Except)
-        try:
-            st.dataframe(
-                my_info,
-                column_config={
-                    "Link": st.column_config.LinkColumn(
-                        "رابط الملف",
-                        display_text="🔗 فتح الرابط"
-                    ),
-                    "Password": st.column_config.TextColumn("كلمة المرور", type="default")
-                },
-                hide_index=True
-            )
-        except Exception as e:
-            # لو فشل العرض بالروابط، اعرضه كجدول عادي عشان الموقع مايقعش
-            st.warning("تم عرض البيانات بنمط مبسط بسبب خطأ في تنسيق الرابط.")
-            st.dataframe(my_info, hide_index=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("الكود", user['User_Code'])
+        c2.metric("العمر", user['Age'])
+        c3.caption(f"تاريخ الانضمام: {str(user['Created_At'])[:10]}")
         
         st.divider()
-        st.subheader("📂 ملفاتك الخاصة")
         
-        # زر تحديث
+        # 2. عرض بيانات الشيت الخاص فقط (بدلاً من الرئيسي)
+        st.subheader(f"📂 ملفك الشخصي ({user['User_Code']})")
+        
+        sheet = connect_google_sheet()
+        if sheet:
+            try:
+                # جلب الشيت الخاص
+                user_ws = sheet.worksheet(str(user['User_Code']))
+                data = user_ws.get_all_records()
+                
+                if data:
+                    df = pd.DataFrame(data)
+                    
+                    # --- الذكاء الاصطناعي لتصليح الروابط ---
+                    column_config_settings = {}
+                    
+                    # بندور على أي عمود اسمه Link أو رابط عشان نحوله لزرار
+                    for col_name in df.columns:
+                        if "link" in col_name.lower() or "رابط" in col_name:
+                            
+                            # دالة صغيرة بتضيف https لو ناقصة
+                            def make_clickable(val):
+                                if not val or pd.isna(val) or str(val).strip() == "":
+                                    return None
+                                url = str(val).strip()
+                                if not url.startswith('http://') and not url.startswith('https://'):
+                                    return f"https://{url}"
+                                return url
+                            
+                            # تطبيق التصليح على العمود
+                            df[col_name] = df[col_name].apply(make_clickable)
+                            
+                            # إعدادات العرض (LinkColumn)
+                            column_config_settings[col_name] = st.column_config.LinkColumn(
+                                label=col_name,
+                                display_text="🔗 فتح الرابط",
+                                help="اضغط لفتح الرابط الخارجي"
+                            )
+
+                    # عرض الجدول النهائي
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        column_config=column_config_settings,
+                        hide_index=True
+                    )
+                else:
+                    st.info("ملفك الشخصي فارغ حالياً. يمكن للإدارة إضافة بيانات هنا.")
+            except Exception as e:
+                st.warning("جاري تجهيز ملفك الشخصي... (لم يتم العثور على الشيت الخاص)")
+                # زر محاولة إنشاء الشيت لو مش موجود
+                if st.button("إنشاء ملفي الآن"):
+                    try:
+                        ws_user = sheet.add_worksheet(title=str(user['User_Code']), rows="100", cols="10")
+                        ws_user.append_row(["الموضوع", "ملاحظات", "التاريخ", "Link"])
+                        st.success("تم الإنشاء! اعمل تحديث للصفحة.")
+                    except:
+                        st.error("موجود بالفعل أو خطأ في الصلاحيات.")
+        
+        st.divider()
         if st.button("تحديث البيانات 🔄"):
             st.rerun()
 
-        if st.button("تسجيل الخروج"):
+        if st.button("تسجيل الخروج", type="primary"):
             st.session_state['logged_in'] = False
             st.session_state['user_data'] = None
             st.rerun()
             
     else:
+        # --- صفحة الدخول / التسجيل ---
         menu = ["تسجيل الدخول", "إنشاء حساب جديد"]
         choice = st.sidebar.selectbox("القائمة", menu)
         
         if choice == "إنشاء حساب جديد":
+            st.header("تسجيل مستخدم جديد")
             with st.form("signup"):
                 c1, c2 = st.columns(2)
                 f = c1.text_input("الاسم الأول")
                 s = c2.text_input("الاسم الثاني")
                 e = st.text_input("البريد الإلكتروني")
                 d = st.date_input("تاريخ الميلاد", min_value=datetime(1950,1,1))
-                lnk = st.text_input("رابط (CV أو ملف) - اختياري")
+                lnk = st.text_input("رابط (CV/ملف) - اختياري")
                 p1 = st.text_input("كلمة المرور", type="password")
                 p2 = st.text_input("تأكيد كلمة المرور", type="password")
                 sub = st.form_submit_button("تسجيل")
@@ -206,25 +229,28 @@ def main():
                         with st.spinner('جاري التسجيل...'):
                             code = save_new_user(f, s, e, p1, d, age, lnk)
                         if code:
-                            st.success(f"تم! كودك: {code}")
+                            st.balloons()
+                            st.success(f"تم التسجيل بنجاح! كودك هو: {code}")
+                            st.info("احتفظ بالكود للدخول.")
                     else:
-                        st.error("تأكد من البيانات")
+                        st.error("تأكد من البيانات وتطابق كلمة المرور")
 
         elif choice == "تسجيل الدخول":
+            st.header("تسجيل الدخول")
             with st.form("login"):
-                c = st.text_input("الكود")
-                p = st.text_input("الباسوورد", type="password")
+                c = st.text_input("الكود (مثال: A12345)")
+                p = st.text_input("كلمة المرور", type="password")
                 sub = st.form_submit_button("دخول")
                 
                 if sub:
-                    with st.spinner('جاري الدخول...'):
+                    with st.spinner('جاري التحقق...'):
                         u = verify_login(c, p)
                     if u is not None:
                         st.session_state['logged_in'] = True
                         st.session_state['user_data'] = u
                         st.rerun()
                     else:
-                        st.error("بيانات خطأ")
+                        st.error("كود الدخول أو كلمة المرور غير صحيحة")
 
 if __name__ == '__main__':
     main()
