@@ -73,7 +73,7 @@ def save_new_user(f_name, s_name, email, password, dob, age, user_link):
         if user_code not in existing_codes:
             break
             
-    # معالجة الرابط لو فاضي
+    # معالجة الرابط لو فاضي عشان ميعملش مشاكل
     if not user_link:
         user_link = ""
     
@@ -131,12 +131,19 @@ def main():
         st.divider()
         st.subheader("📋 بياناتك المسجلة")
         
-        # حماية ضد نقص البيانات
+        # تحويل بيانات المستخدم لـ DataFrame
         my_info = pd.DataFrame([user])
         
-        # لو العمود مش موجود في البيانات القديمة، ننشئه فاضي عشان الكود ميضربش
+        # --- التصليح هنا: التأكد من وجود عمود الرابط وتحويله لنص ---
         if "Link" not in my_info.columns:
-            my_info["Link"] = None
+            my_info["Link"] = "" # لو مش موجود نخليه فاضي
+        
+        # تحويل العمود لنص إجباري عشان منع الخطأ TypeError
+        my_info["Link"] = my_info["Link"].astype(str)
+        
+        # لو الخانة فيها "nan" (يعني فاضية بلغة الكمبيوتر) نحولها لـ None عشان تظهر فاضية وماتعملش Error
+        my_info["Link"] = my_info["Link"].replace('nan', None)
+        my_info["Link"] = my_info["Link"].replace('', None)
 
         st.dataframe(
             my_info,
@@ -180,7 +187,9 @@ def main():
                 s = c2.text_input("الاسم الثاني")
                 e = st.text_input("البريد الإلكتروني")
                 d = st.date_input("تاريخ الميلاد", min_value=datetime(1950,1,1))
-                lnk = st.text_input("رابط (CV أو ملف)")
+                
+                lnk = st.text_input("رابط (CV أو ملف) - اختياري")
+                
                 p1 = st.text_input("كلمة المرور", type="password")
                 p2 = st.text_input("تأكيد كلمة المرور", type="password")
                 sub = st.form_submit_button("تسجيل")
