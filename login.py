@@ -7,8 +7,8 @@ import string
 from datetime import datetime
 import os
 
-# --- إعدادات الصفحة ---
-st.set_page_config(page_title="نظام إدارة المستخدمين", layout="centered", direction="rtl")
+# --- إعدادات الصفحة (تم التصحيح) ---
+st.set_page_config(page_title="نظام إدارة المستخدمين", layout="centered")
 
 # اسم ملف الإكسل
 EXCEL_FILE = "users_database.xlsx"
@@ -34,9 +34,8 @@ def calculate_age(birth_date):
 
 def generate_user_code():
     """توليد كود: حرف كبير + 5 أرقام عشوائية غير مكررة"""
-    # التأكد من عدم التكرار داخل الكود نفسه
     letter = random.choice(string.ascii_uppercase)
-    digits = random.sample(string.digits, 5) # sample تضمن عدم تكرار الرقم داخل القائمة المختارة
+    digits = random.sample(string.digits, 5)
     code = letter + "".join(digits)
     return code
 
@@ -46,7 +45,7 @@ def save_new_user(first_name, second_name, email, password, dob, age):
         wb = load_workbook(EXCEL_FILE)
         ws_main = wb[MAIN_SHEET_NAME]
         
-        # التأكد من أن الكود غير مستخدم من قبل في قاعدة البيانات
+        # التأكد من عدم تكرار الكود
         existing_codes = [row[0] for row in ws_main.iter_rows(min_row=2, values_only=True)] if ws_main.max_row > 1 else []
         
         while True:
@@ -57,9 +56,9 @@ def save_new_user(first_name, second_name, email, password, dob, age):
         # 1. الحفظ في الشيت الرئيسي
         ws_main.append([user_code, first_name, second_name, email, password, dob, age, datetime.now()])
         
-        # 2. إنشاء شيت خاص بالمستخدم (باسم الكود الخاص به)
+        # 2. إنشاء شيت خاص بالمستخدم
         ws_user = wb.create_sheet(title=user_code)
-        ws_user.append(["بيانات خاصة بالمستخدم", "ملاحظات", "التاريخ"]) # مثال لرؤوس أعمدة الشيت الخاص
+        ws_user.append(["بيانات خاصة بالمستخدم", "ملاحظات", "التاريخ"])
         
         wb.save(EXCEL_FILE)
         return user_code
@@ -71,35 +70,33 @@ def verify_login(user_code, password):
     """التحقق من صحة تسجيل الدخول"""
     try:
         df = pd.read_excel(EXCEL_FILE, sheet_name=MAIN_SHEET_NAME, engine='openpyxl')
-        # تحويل الكود لنص لضمان المطابقة
         df['User_Code'] = df['User_Code'].astype(str)
-        user_row = df[(df['User_Code'] == user_code) & (df['Password'] == str(password))]
+        # تحويل الباسورد لـ str للمقارنة الآمنة
+        user_row = df[(df['User_Code'] == user_code) & (df['Password'].astype(str) == str(password))]
         
         if not user_row.empty:
-            return user_row.iloc[0] # إرجاع بيانات المستخدم
+            return user_row.iloc[0]
         else:
             return None
     except Exception as e:
-        st.error("قاعدة البيانات فارغة أو غير موجودة.")
+        # في حالة عدم وجود الملف بعد، نعتبر قاعدة البيانات فارغة
         return None
 
 # --- واجهة التطبيق (UI) ---
 
 def main():
-    init_excel() # التأكد من وجود الملف عند البدء
+    init_excel()
     
     st.title("نظام التسجيل المتطور 🚀")
 
-    # القائمة الجانبية للتنقل
     menu = ["تسجيل الدخول", "إنشاء حساب جديد"]
     
-    # استخدام Session State للتحكم في ظهور الصفحة بعد تسجيل الدخول
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
         st.session_state['user_data'] = None
 
     if st.session_state['logged_in']:
-        # --- صفحة المستخدم (بعد تسجيل الدخول) ---
+        # --- صفحة المستخدم ---
         user = st.session_state['user_data']
         
         st.success(f"تم تسجيل الدخول بنجاح! مرحباً بك يا {user['First_Name']}")
@@ -115,9 +112,8 @@ def main():
             
         st.divider()
         st.subheader("مساحة البيانات الشخصية")
-        st.write("هنا ستظهر البيانات الخاصة بك من الشيت الخاص بك (فارغة حالياً كما طلبت).")
+        st.write("هنا ستظهر البيانات الخاصة بك من الشيت الخاص بك.")
         
-        # عرض محتوى الشيت الخاص بالمستخدم للعلم فقط
         try:
             user_sheet_df = pd.read_excel(EXCEL_FILE, sheet_name=str(user['User_Code']), engine='openpyxl')
             st.dataframe(user_sheet_df, use_container_width=True)
@@ -130,7 +126,7 @@ def main():
             st.rerun()
 
     else:
-        # --- الصفحات الرئيسية (دخول / تسجيل) ---
+        # --- القائمة الجانبية ---
         choice = st.sidebar.selectbox("القائمة", menu)
 
         if choice == "إنشاء حساب جديد":
@@ -161,23 +157,19 @@ def main():
                     
                     if new_code:
                         st.balloons()
-                        st.success("✅ تم إنشاء الحساب بنجاح وتم إنشاء الشيت الخاص بك!")
-                        
-                        # صفحة الـ Landing بعد التسجيل مباشرة
+                        st.success("✅ تم إنشاء الحساب بنجاح!")
                         st.markdown(f"""
                         ### بياناتك للدخول:
                         - **الاسم:** {f_name} {s_name}
-                        - **كود الدخول (هام جداً):** `{new_code}`
+                        - **كود الدخول:** `{new_code}`
                         - **العمر:** {age}
-                        
-                        *يرجى حفظ كود الدخول لاستخدامه في صفحة تسجيل الدخول.*
                         """)
         
         elif choice == "تسجيل الدخول":
             st.header("🔐 تسجيل الدخول")
             
             with st.form("login_form"):
-                login_code = st.text_input("كود الدخول (مثال: K12345)")
+                login_code = st.text_input("كود الدخول")
                 login_pass = st.text_input("كلمة المرور", type="password")
                 submit_login = st.form_submit_button("دخول")
             
