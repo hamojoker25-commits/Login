@@ -41,7 +41,6 @@ def init_sheet(sheet):
         worksheet = sheet.worksheet(MAIN_WORKSHEET_NAME)
     except:
         worksheet = sheet.add_worksheet(title=MAIN_WORKSHEET_NAME, rows="1000", cols="20")
-        # ضفت عمود جديد اسمه "Link" في الآخر
         worksheet.append_row(["User_Code", "First_Name", "Second_Name", "Email", "Password", "DOB", "Age", "Created_At", "Link"])
     return worksheet
 
@@ -58,7 +57,6 @@ def generate_user_code():
     code = letter + "".join(digits)
     return code
 
-# ضفت معامل جديد للدالة اسمه user_link
 def save_new_user(f_name, s_name, email, password, dob, age, user_link):
     sheet = connect_google_sheet()
     if not sheet: return None
@@ -74,8 +72,11 @@ def save_new_user(f_name, s_name, email, password, dob, age, user_link):
         user_code = generate_user_code()
         if user_code not in existing_codes:
             break
+            
+    # معالجة الرابط لو فاضي
+    if not user_link:
+        user_link = ""
     
-    # حفظ الرابط في العمود الأخير
     ws_main.append_row([user_code, f_name, s_name, email, password, str(dob), age, str(datetime.now()), user_link])
     
     try:
@@ -99,6 +100,7 @@ def verify_login(user_code, password):
     
     if df.empty: return None
 
+    # تحويل البيانات لنصوص لتجنب الأخطاء
     df['User_Code'] = df['User_Code'].astype(str)
     df['Password'] = df['Password'].astype(str)
     
@@ -129,11 +131,13 @@ def main():
         st.divider()
         st.subheader("📋 بياناتك المسجلة")
         
-        # عرض البيانات الشخصية في جدول منسق
-        # تحويل بيانات المستخدم الحالية لـ DataFrame عشان نعرضها
+        # حماية ضد نقص البيانات
         my_info = pd.DataFrame([user])
         
-        # هنا السحر: إعدادات العمود عشان الرابط يظهر بشكل شيك
+        # لو العمود مش موجود في البيانات القديمة، ننشئه فاضي عشان الكود ميضربش
+        if "Link" not in my_info.columns:
+            my_info["Link"] = None
+
         st.dataframe(
             my_info,
             column_config={
@@ -141,7 +145,7 @@ def main():
                     "رابط الملف",
                     display_text="🔗 فتح الرابط"
                 ),
-                "Password": st.column_config.TextColumn("كلمة المرور", type="default") # إخفاء نوعا ما
+                "Password": st.column_config.TextColumn("كلمة المرور", type="default")
             },
             hide_index=True
         )
@@ -176,10 +180,7 @@ def main():
                 s = c2.text_input("الاسم الثاني")
                 e = st.text_input("البريد الإلكتروني")
                 d = st.date_input("تاريخ الميلاد", min_value=datetime(1950,1,1))
-                
-                # خانة جديدة للرابط
-                lnk = st.text_input("رابط (CV، Google Drive، أو موقع)")
-                
+                lnk = st.text_input("رابط (CV أو ملف)")
                 p1 = st.text_input("كلمة المرور", type="password")
                 p2 = st.text_input("تأكيد كلمة المرور", type="password")
                 sub = st.form_submit_button("تسجيل")
@@ -188,7 +189,6 @@ def main():
                     if p1 == p2 and f and e:
                         age = calculate_age(d)
                         with st.spinner('جاري التسجيل...'):
-                            # نمرر الرابط للدالة
                             code = save_new_user(f, s, e, p1, d, age, lnk)
                         if code:
                             st.success(f"تم! كودك: {code}")
