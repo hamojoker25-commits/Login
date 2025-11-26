@@ -7,25 +7,23 @@ import string
 from datetime import datetime
 import time
 
-# --- إعدادات الصفحة ---
-st.set_page_config(page_title="نظام المعاهد العليا", layout="wide", page_icon="🎓")
+# --- 1. إعدادات الصفحة والتصميم ---
+st.set_page_config(page_title="نظام المعاهد العليا الذكي", layout="wide", page_icon="🎓")
 
-# --- ثوابت النظام ---
+# --- 2. ثوابت النظام ---
 SHEET_NAME = "users_database"
 BASE_FEES = 18000
 BOOK_FEES = {1: 2000, 2: 2500, 3: 3000, 4: 3500}
 
-# --- تهيئة الـ Session State (لحل مشكلة إعادة التحميل) ---
-if 'logged_in_student' not in st.session_state:
-    st.session_state['logged_in_student'] = None
-if 'logged_in_teacher' not in st.session_state:
-    st.session_state['logged_in_teacher'] = None
-if 'current_menu' not in st.session_state:
-    st.session_state['current_menu'] = "الرئيسية"
+# --- 3. إدارة الحالة (Session State) ---
+# بنستخدم ده عشان نحفظ مين مسجل دخول والبيانات ماتضعش لما الصفحة تعمل Refresh
+if 'user_role' not in st.session_state: st.session_state['user_role'] = None
+if 'user_info' not in st.session_state: st.session_state['user_info'] = None
 
-# --- الاتصال بجوجل شيت ---
+# --- 4. الاتصال بجوجل شيت (Backend) ---
 @st.cache_resource
-def connect_google_sheet():
+def get_client():
+    """دالة تتصل بجوجل مرة واحدة فقط لسرعة الأداء"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
         if "gcp_service_account" in st.secrets:
@@ -34,507 +32,377 @@ def connect_google_sheet():
                 creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
-            return client.open(SHEET_NAME)
+            return client
         else:
-            st.error("⚠️ لم يتم العثور على مفاتيح الربط في Secrets")
+            st.error("⚠️ بيانات الربط (Secrets) غير موجودة.")
             return None
     except Exception as e:
-        st.error(f"خطأ في الاتصال: {e}")
+        st.error(f"خطأ تقني في الاتصال: {e}")
         return None
 
-# --- دوال مساعدة (Safe Functions لمنع الـ ValueError) ---
-def safe_int(value):
-    """تحويل آمن للنصوص إلى أرقام صحيحة"""
+def get_sheet_data(worksheet_name):
+    """جلب البيانات طازجة (بدون تخزين مؤقت) لحل مشكلة اختفاء البيانات"""
+    client = get_client()
+    if not client: return pd.DataFrame()
+    
     try:
-        return int(float(str(value).replace(',', '').strip()))
-    except:
-        return 0
-
-def get_data(sheet_obj, worksheet_name):
-    try:
-        ws = sheet_obj.worksheet(worksheet_name)
-        return pd.DataFrame(ws.get_all_records())
-    except:
+        sheet = client.open(SHEET_NAME)
+        # التأكد من وجود الشيت وإنشاؤه لو مش موجود
+        try:
+            ws = sheet.worksheet(worksheet_name)
+        except:
+            ws = sheet.add_worksheet(worksheet_name, 1000, 20)
+            # إضافة العناوين الافتراضية حسب النوع
+            if worksheet_name == "Teachers_Main":
+                ws.append_row(["Code", "Name", "Password", "Subject", "Data"])
+            elif worksheet_name == "Students_Main":
+                ws.append_row(["Code", "Name", "Password", "Year", "Paid_Tuition", "Paid_Books", "Data"])
+            elif worksheet_name == "Subjects_Data":
+                ws.append_row(["Subject", "Teacher_Code", "Year"])
+        
+        data = ws.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"خطأ في قراءة {worksheet_name}: {e}")
         return pd.DataFrame()
 
-def generate_code(prefix, length):
-    digits = ''.join(random.choices(string.digits, k=length))
-    if prefix == "T": # معلم: حرفين كابتل + 8 أرقام
-        caps = ''.join(random.choices(string.ascii_uppercase, k=2))
-        return caps + digits
-    elif prefix == "S": # طالب: حرف كابتل + 7 أرقام
-        cap = random.choice(string.ascii_uppercase)
-        return cap + digits
-    return digits
+# --- 5. دوال المنطق والعمليات ---
 
-def calculate_tuition(year):
-    fees = BASE_FEES
-    # حساب مركب: كل سنة تزيد 10% عن السنة السابقة
-    for _ in range(1, safe_int(year)):
-        fees += fees * 0.10
-    return int(fees)
+def generate_code(prefix):
+    """توليد كود عشوائي قوي"""
+    digits = ''.join(random.choices(string.digits, k=8))
+    caps = ''.join(random.choices(string.ascii_uppercase, k=2))
+    return f"{prefix}{caps}{digits}"  # مثال: TEA12345678
 
-# --- الوظائف الرئيسية ---
-
-def register_student(data_dict, sheet):
-    ws_main = sheet.worksheet("Students_Main")
-    try:
-        existing_codes = ws_main.col_values(1)
-    except:
-        existing_codes = []
+def register_user_logic(role, data_dict):
+    client = get_client()
+    sheet = client.open(SHEET_NAME)
     
-    while True:
-        new_code = generate_code("S", 7)
-        if new_code not in existing_codes:
-            break
-            
-    password = generate_code("S", 7)
-    
-    # الترتيب مهم جداً عشان الخزينة تقرأ صح
-    # Paid_Tuition رقم 18 (index 17) | Paid_Books رقم 19 (index 18)
-    row = [
-        new_code, data_dict['name'], password, data_dict['dob'], data_dict['gov'], 
-        data_dict['address'], data_dict['nat'], data_dict['nid'], data_dict['nid_source'],
-        data_dict['religion'], data_dict['cert'], data_dict['cert_date'], data_dict['seat_num'],
-        data_dict['total_score'], data_dict['major'], 1, # Year
-        str(datetime.now()), 0, 0, "{}" # Paid Tuition, Paid Books, Subjects JSON
-    ]
-    ws_main.append_row(row)
-    
-    try:
-        ws_user = sheet.add_worksheet(title=new_code, rows="100", cols="10")
-        ws_user.append_row(["البيان", "التفاصيل", "الرابط/ملاحظات", "التاريخ"])
-        ws_user.append_row(["تنبيه", "أي تعديلات هنا تتم بمعرفة IT", "", str(datetime.now())])
-    except:
-        pass
+    if role == "Teacher":
+        ws_name = "Teachers_Main"
+        prefix = "T"
+    else:
+        ws_name = "Students_Main"
+        prefix = "S"
         
-    return new_code, password
-
-def register_teacher(data_dict, sheet):
-    try:
-        ws_main = sheet.worksheet("Teachers_Main")
-    except:
-        ws_main = sheet.add_worksheet("Teachers_Main", 1000, 20)
-        ws_main.append_row(["Code", "Name", "Password", "DOB", "Nat", "Religion", "Gov", "Address", "Email", "NID", "NID_Source"])
-
-    try:
-        existing_codes = ws_main.col_values(1)
-    except:
-        existing_codes = []
-
+    ws = sheet.worksheet(ws_name)
+    
+    # التأكد من عدم تكرار الكود
+    try: existing_codes = ws.col_values(1)
+    except: existing_codes = []
+    
     while True:
-        # كود المعلم: حرفين كابتل + 8 أرقام
-        digits = ''.join(random.choices(string.digits, k=8))
-        caps = ''.join(random.choices(string.ascii_uppercase, k=2))
-        new_code = caps + digits
+        new_code = generate_code(prefix)
         if new_code not in existing_codes:
             break
             
-    # باسوورد المعلم (حرفين و8 أرقام مختلفين عن الكود)
-    pwd_digits = ''.join(random.choices(string.digits, k=8))
-    pwd_caps = ''.join(random.choices(string.ascii_uppercase, k=2))
-    password = pwd_caps + pwd_digits
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
     
-    row = [
-        new_code, data_dict['name'], password, data_dict['dob'], data_dict['nat'],
-        data_dict['religion'], data_dict['gov'], data_dict['address'], 
-        data_dict['email'], data_dict['nid'], data_dict['nid_source']
-    ]
-    ws_main.append_row(row)
+    # حفظ البيانات
+    if role == "Teacher":
+        # Code, Name, Password, Subject, Data(JSON)
+        row = [new_code, data_dict['name'], password, "", str(data_dict)]
+    else:
+        # Code, Name, Password, Year, Paid_T, Paid_B, Data(JSON)
+        # Year=1 (الفرقة الأولى), المدفوع=0
+        row = [new_code, data_dict['name'], password, 1, 0, 0, str(data_dict)]
+        
+    ws.append_row(row)
     
-    # إنشاء شيت خاص للمعلم
+    # إنشاء شيت خاص
     try:
         sheet.add_worksheet(title=new_code, rows="100", cols="10")
-        sheet.worksheet(new_code).append_row(["الملاحظات", "التاريخ"])
+        sheet.worksheet(new_code).append_row(["النوع", "التفاصيل", "التاريخ", "Link"])
     except:
         pass
         
     return new_code, password
 
-def process_payment(student_code, amount, pay_type, visa_details, sheet, payment_category="tuition"):
-    ws = sheet.worksheet("Students_Main")
-    cell = ws.find(student_code)
-    row_num = cell.row
-    
-    # استخدام safe_int لمنع الـ ValueError
-    col_idx = 18 if payment_category == "tuition" else 19
-    current_val_raw = ws.cell(row_num, col_idx).value
-    current_val = safe_int(current_val_raw)
-    
-    new_val = current_val + safe_int(amount)
-    ws.update_cell(row_num, col_idx, new_val)
-    
-    # تسجيل في شيت الطالب
-    try:
-        ws_student = sheet.worksheet(student_code)
-        note = f"دفع {payment_category} - {pay_type}"
-        if pay_type == "فيزا" and visa_details:
-            note += f" (Visa Ends: {visa_details[-4:]})"
+def login_logic(code, password, role_target):
+    """نظام تسجيل دخول صارم يحل مشكلة عدم الفتح"""
+    if role_target == "Teacher":
+        df = get_sheet_data("Teachers_Main")
+    else:
+        df = get_sheet_data("Students_Main")
         
-        ws_student.append_row(["عملية دفع", f"{amount} ج.م", note, str(datetime.now())])
-    except:
-        pass # لو شيت الطالب مش موجود لسبب ما
-    return True
-
-# --- الواجهة الرئيسية ---
-
-def main():
-    sheet = connect_google_sheet()
-    if not sheet:
-        st.stop()
+    if df.empty:
+        return None
         
-    # التأكد من وجود الشيتات الأساسية (الطلاب، المعلمين، المواد)
-    try:
-        sheet.worksheet("Students_Main")
-    except:
-        ws = sheet.add_worksheet("Students_Main", 1000, 25)
-        ws.append_row(["Code", "Name", "Password", "DOB", "Gov", "Address", "Nat", "NID", "NID_Source", 
-                       "Religion", "Cert", "Cert_Date", "Seat_Num", "Score", "Major", "Year", 
-                       "Join_Date", "Paid_Tuition", "Paid_Books", "Subjects_Status"])
+    # تنظيف البيانات (أهم خطوة لحل مشكلتك)
+    # بنحول كل حاجة لنص وبنشيل المسافات
+    df['Code'] = df['Code'].astype(str).str.strip()
+    df['Password'] = df['Password'].astype(str).str.strip()
+    code_input = str(code).strip()
+    pass_input = str(password).strip()
     
-    try:
-        sheet.worksheet("Subjects_Data")
-    except:
-        ws_sub = sheet.add_worksheet("Subjects_Data", 1000, 5)
-        ws_sub.append_row(["Subject_Name", "Year", "Term", "Teacher_Code"])
-
-    # القائمة الجانبية (Navigation)
-    st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2942/2942544.png", width=100)
-    st.sidebar.title("نظام المعاهد العليا")
+    user = df[(df['Code'] == code_input) & (df['Password'] == pass_input)]
     
-    # استخدام Session State للتحكم في القائمة عشان الصفحة ما تعملش Reload وترجع للأول
-    menu_options = ["الرئيسية", "شؤون الطلاب (تسجيل)", "شؤون المعلمين", "الخزينة (دفع المصاريف)", "بوابة الطالب", "بوابة المعلم", "البحث والاستعلام"]
+    if not user.empty:
+        return user.iloc[0].to_dict()
+    return None
+
+# --- 6. واجهات المستخدم (Front-End) ---
+
+def admin_dashboard():
+    st.title("🛠️ لوحة تحكم الإدارة (الكونترول)")
     
-    # زرار للقائمة
-    selected_menu = st.sidebar.radio("القائمة", menu_options, index=menu_options.index(st.session_state['current_menu']))
+    tab1, tab2, tab3, tab4 = st.tabs(["تسجيل طلاب", "تسجيل معلمين", "الخزينة", "إدارة المواد"])
     
-    # تحديث الحالة لو المستخدم اختار حاجة جديدة
-    if selected_menu != st.session_state['current_menu']:
-        st.session_state['current_menu'] = selected_menu
-        st.rerun()
-
-    menu = st.session_state['current_menu']
-
-    if menu == "الرئيسية":
-        st.title("🏛️ نظام إدارة المعاهد العليا")
-        st.info("مرحباً بك في النظام المتكامل.")
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("الطلاب", len(get_data(sheet, "Students_Main")))
-        with c2:
-            st.metric("المعلمين", len(get_data(sheet, "Teachers_Main")))
-
-    # ------------------------- شؤون الطلاب -------------------------
-    elif menu == "شؤون الطلاب (تسجيل)":
-        st.header("📝 تسجيل طالب جديد")
-        with st.form("new_student"):
+    # --- تسجيل طلاب ---
+    with tab1:
+        st.subheader("إضافة طالب جديد")
+        with st.form("add_student"):
             c1, c2 = st.columns(2)
-            name = c1.text_input("الاسم كامل")
-            dob = c2.date_input("تاريخ الميلاد", min_value=datetime(1990,1,1))
+            name = c1.text_input("الاسم رباعي")
+            nid = c2.text_input("الرقم القومي")
+            major = st.selectbox("التخصص", ["نظم معلومات", "محاسبة", "إدارة"])
+            # (يمكنك إضافة باقي الحقول هنا)
+            submitted = st.form_submit_button("تسجيل الطالب")
+            if submitted and name and nid:
+                with st.spinner("جاري التسجيل..."):
+                    data = {"name": name, "nid": nid, "major": major, "join_date": str(datetime.now())}
+                    code, pwd = register_user_logic("Student", data)
+                st.success("تم الحفظ بنجاح! ✅")
+                st.info(f"كود الطالب: {code}")
+                st.warning(f"كلمة المرور: {pwd}")
+
+    # --- تسجيل معلمين (تم حل المشكلة هنا) ---
+    with tab2:
+        st.subheader("إضافة عضو هيئة تدريس")
+        with st.form("add_teacher"):
+            t_name = st.text_input("اسم المعلم")
+            t_nid = st.text_input("الرقم القومي")
+            t_phone = st.text_input("رقم الهاتف")
+            t_email = st.text_input("البريد الإلكتروني")
+            submitted_t = st.form_submit_button("تسجيل المعلم")
             
-            c3, c4 = st.columns(2)
-            gov = c3.text_input("المحافظة")
-            address = c4.text_input("العنوان")
-            
-            c5, c6 = st.columns(2)
-            nat = c5.text_input("الجنسية", "مصر")
-            religion = c6.selectbox("الديانة", ["مسلم", "مسيحي", "أخرى"])
-            
-            c7, c8 = st.columns(2)
-            nid = c7.text_input("الرقم القومي (14 رقم)")
-            nid_src = c8.text_input("جهة الإصدار")
-            
-            st.markdown("---")
-            st.subheader("بيانات المؤهل")
-            cc1, cc2, cc3 = st.columns(3)
-            cert = cc1.text_input("الشهادة الحاصل عليها")
-            cert_date = cc2.date_input("تاريخ الشهادة")
-            seat_num = cc3.text_input("رقم الجلوس")
-            
-            cc4, cc5 = st.columns(2)
-            total = cc4.number_input("المجموع", min_value=0.0)
-            major = cc5.selectbox("التخصص", ["نظم معلومات", "إدارة أعمال", "محاسبة"])
-            
-            submit = st.form_submit_button("حفظ وتسجيل")
-            
-            if submit:
-                if name and nid:
-                    data = {
-                        "name": name, "dob": str(dob), "gov": gov, "address": address,
-                        "nat": nat, "nid": nid, "nid_source": nid_src, "religion": religion,
-                        "cert": cert, "cert_date": str(cert_date), "seat_num": seat_num,
-                        "total_score": total, "major": major
-                    }
-                    with st.spinner("جاري التسجيل..."):
-                        code, pwd = register_student(data, sheet)
-                    
-                    st.success("تم تسجيل الطالب بنجاح! ✅")
-                    st.info(f"👤 كود الطالب: {code}")
-                    st.warning(f"🔑 كلمة المرور: {pwd}")
+            if submitted_t and t_name:
+                with st.spinner("جاري إنشاء الملف..."):
+                    data = {"name": t_name, "nid": t_nid, "phone": t_phone, "email": t_email}
+                    code, pwd = register_user_logic("Teacher", data)
+                st.success("تم إنشاء حساب المعلم! 🚀")
+                st.markdown(f"""
+                ### 📌 بيانات الدخول (هام جداً):
+                - **الكود:** `{code}`
+                - **الباسوورد:** `{pwd}`
+                *(يرجى نسخ هذه البيانات الآن)*
+                """)
+
+    # --- الخزينة ---
+    with tab3:
+        st.subheader("💰 تحصيل المصروفات")
+        s_code = st.text_input("ابحث بكود الطالب", key="pay_search")
+        if st.button("بحث"):
+            df = get_sheet_data("Students_Main")
+            if not df.empty:
+                df['Code'] = df['Code'].astype(str).str.strip()
+                student = df[df['Code'] == str(s_code).strip()]
+                if not student.empty:
+                    st.session_state['pay_student'] = student.iloc[0].to_dict()
                 else:
-                    st.error("يرجى إكمال البيانات الأساسية")
-
-    # ------------------------- شؤون المعلمين (تعديل كامل) -------------------------
-    elif menu == "شؤون المعلمين":
-        st.header("👨‍🏫 تسجيل معلم جديد")
-        st.caption("أدخل البيانات كاملة لإنشاء ملف المعلم")
+                    st.error("طالب غير موجود")
         
-        with st.form("new_teacher_full"):
-            t1, t2 = st.columns(2)
-            t_name = t1.text_input("الاسم كامل")
-            t_dob = t2.date_input("تاريخ الميلاد", min_value=datetime(1960,1,1))
+        if 'pay_student' in st.session_state:
+            stu = st.session_state['pay_student']
+            st.write(f"الطالب: **{stu['Name']}** | الفرقة: {stu['Year']}")
             
-            t3, t4 = st.columns(2)
-            t_nat = t3.text_input("الجنسية", "مصر")
-            t_rel = t4.selectbox("الديانة", ["مسلم", "مسيحي"])
+            # العمليات الحسابية
+            try: year = int(stu['Year'])
+            except: year = 1
             
-            t5, t6 = st.columns(2)
-            t_gov = t5.text_input("المحافظة")
-            t_addr = t6.text_input("العنوان")
+            tuition_fees = BASE_FEES
+            for _ in range(1, year): tuition_fees += tuition_fees * 0.10
+            tuition_fees = int(tuition_fees)
             
-            t7, t8 = st.columns(2)
-            t_email = t7.text_input("البريد الإلكتروني")
-            t_nid = t8.text_input("الرقم القومي")
-            
-            t_nid_src = st.text_input("جهة إصدار الرقم القومي")
-            
-            t_submit = st.form_submit_button("تسجيل المعلم")
-            
-            if t_submit:
-                if t_name and t_nid:
-                    data = {
-                        "name": t_name, "dob": str(t_dob), "nat": t_nat, "religion": t_rel,
-                        "gov": t_gov, "address": t_addr, "email": t_email, 
-                        "nid": t_nid, "nid_source": t_nid_src
-                    }
-                    with st.spinner("جاري إنشاء حساب المعلم..."):
-                        code, pwd = register_teacher(data, sheet)
-                    st.success("تم تسجيل المعلم بنجاح! ✅")
-                    st.info(f"👨‍🏫 كود المعلم: {code}")
-                    st.warning(f"🔑 كلمة المرور: {pwd}")
-                else:
-                    st.error("الاسم والرقم القومي مطلوبان")
-
-    # ------------------------- الخزينة (حل مشكلة ValueError) -------------------------
-    elif menu == "الخزينة (دفع المصاريف)":
-        st.header("💰 الخزينة")
-        
-        tab1, tab2 = st.tabs(["مصاريف دراسية", "كتب دراسية"])
-        
-        with tab1:
-            st.subheader("دفع المصاريف الدراسية")
-            s_code = st.text_input("كود الطالب للبحث", key="search_fees")
-            
-            if s_code:
-                df = get_data(sheet, "Students_Main")
-                if not df.empty and 'Code' in df.columns:
-                    # تحويل الكود لنص للمقارنة
-                    df['Code'] = df['Code'].astype(str)
-                    student = df[df['Code'] == str(s_code)]
-                    
-                    if not student.empty:
-                        row_data = student.iloc[0]
-                        st.success(f"الطالب: {row_data['Name']}")
-                        
-                        year = safe_int(row_data['Year'])
-                        paid = safe_int(row_data['Paid_Tuition'])
-                        
-                        total_due = calculate_tuition(year)
-                        remaining = total_due - paid
-                        
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("الفرقة", year)
-                        c2.metric("المستحق", f"{total_due:,}")
-                        c3.metric("المتبقي", f"{remaining:,}", delta_color="inverse")
-                        
-                        pay_method = st.radio("طريقة الدفع", ["كاش", "فيزا"])
-                        visa_info = ""
-                        if pay_method == "فيزا":
-                            v_num = st.text_input("رقم الفيزا (للتوثيق فقط)", type="password")
-                            if v_num: visa_info = v_num
-                            
-                        amount = st.number_input("المبلغ", min_value=1, max_value=int(remaining) if remaining > 0 else 1000000)
-                        
-                        if st.button("تأكيد الدفع"):
-                            if remaining <= 0:
-                                st.warning("لا يوجد مستحقات.")
-                            else:
-                                process_payment(s_code, amount, pay_method, visa_info, sheet, "tuition")
-                                st.balloons()
-                                st.success("تم الدفع!")
-                                time.sleep(1)
-                                st.rerun()
-                    else:
-                        st.error("كود غير صحيح")
-                else:
-                    st.error("قاعدة البيانات فارغة أو بها مشكلة")
-
-        with tab2:
-            st.subheader("دفع مصاريف الكتب (كاش)")
-            b_code = st.text_input("كود الطالب", key="book_fees")
-            if b_code:
-                df = get_data(sheet, "Students_Main")
-                if not df.empty and 'Code' in df.columns:
-                    df['Code'] = df['Code'].astype(str)
-                    stud = df[df['Code'] == str(b_code)]
-                    
-                    if not stud.empty:
-                        row = stud.iloc[0]
-                        yr = safe_int(row['Year'])
-                        book_fee = BOOK_FEES.get(yr, 0)
-                        paid_book = safe_int(row['Paid_Books'])
-                        
-                        st.write(f"الطالب: {row['Name']} - الفرقة: {yr}")
-                        
-                        if paid_book >= book_fee:
-                            st.success("✅ الكتب مدفوعة بالكامل.")
-                            st.info(f"بيانات الدخول:\nالكود: {b_code}\nالباسوورد: {row['Password']}")
-                        else:
-                            st.metric("المطلوب للكتب", f"{book_fee} ج.م")
-                            if st.button("تأكيد الدفع (كاش)"):
-                                process_payment(b_code, book_fee, "Cash", "", sheet, "books")
-                                st.success("تم الدفع!")
-                                time.sleep(1)
-                                st.rerun()
-
-    # ------------------------- بوابة الطالب -------------------------
-    elif menu == "بوابة الطالب":
-        # لو مش مسجل دخول، اظهر شاشة الدخول
-        if st.session_state['logged_in_student'] is None:
-            st.header("🔐 دخول الطالب")
-            code = st.text_input("كود الطالب")
-            pas = st.text_input("كلمة المرور", type="password")
-            
-            if st.button("دخول"):
-                df = get_data(sheet, "Students_Main")
-                if not df.empty:
-                    df['Code'] = df['Code'].astype(str)
-                    df['Password'] = df['Password'].astype(str)
-                    user = df[(df['Code'] == code) & (df['Password'] == pas)]
-                    
-                    if not user.empty:
-                        st.session_state['logged_in_student'] = user.iloc[0].to_dict()
-                        st.rerun()
-                    else:
-                        st.error("بيانات خطأ")
-        else:
-            # لو مسجل دخول، اظهر بياناته
-            u = st.session_state['logged_in_student']
-            st.title(f"مرحباً، {u['Name']}")
-            
-            # تحديث البيانات من الشيت مباشرة عشان لو حصل دفع
-            # (اختياري: ممكن نعمل استعلام جديد هنا للتأكد من أحدث رصيد)
-            
-            yr = safe_int(u['Year'])
-            total = calculate_tuition(yr)
-            paid = safe_int(u['Paid_Tuition'])
+            paid = int(stu['Paid_Tuition']) if str(stu['Paid_Tuition']).isdigit() else 0
+            remaining = tuition_fees - paid
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("الفرقة", yr)
-            c2.metric("المدفوع", paid)
-            c3.metric("المتبقي", total - paid)
+            c1.metric("المستحق", f"{tuition_fees:,}")
+            c2.metric("المدفوع", f"{paid:,}")
+            c3.metric("المتبقي", f"{remaining:,}", delta_color="inverse")
             
-            st.divider()
-            st.subheader("📂 ملفاتك ودرجاتك")
-            try:
-                ws = sheet.worksheet(str(u['Code']))
-                data = ws.get_all_records()
-                st.dataframe(data, use_container_width=True)
-            except:
-                st.info("الملف قيد التجهيز")
+            pay_amt = st.number_input("المبلغ للدفع", min_value=0, max_value=remaining if remaining > 0 else 0)
+            if st.button("تأكيد الدفع"):
+                client = get_client()
+                sheet = client.open(SHEET_NAME)
+                ws = sheet.worksheet("Students_Main")
+                cell = ws.find(str(stu['Code']))
+                # تحديث الخلية (العمود 5 للمصاريف)
+                ws.update_cell(cell.row, 5, paid + pay_amt)
                 
-            if st.button("خروج"):
-                st.session_state['logged_in_student'] = None
+                # إضافة إيصال في شيت الطالب
+                try:
+                    sheet.worksheet(str(stu['Code'])).append_row(["سداد مصاريف", f"{pay_amt} ج.م", str(datetime.now()), ""])
+                except: pass
+                
+                st.success("تم الدفع بنجاح!")
+                del st.session_state['pay_student']
                 st.rerun()
 
-    # ------------------------- بوابة المعلم (التعديل الجبار) -------------------------
-    elif menu == "بوابة المعلم":
-        # التحقق من الدخول
-        if st.session_state['logged_in_teacher'] is None:
-            st.header("👨‍🏫 بوابة المعلمين")
-            t_code_in = st.text_input("كود المعلم")
-            t_pass_in = st.text_input("كلمة المرور", type="password")
+    # --- إدارة المواد ---
+    with tab4:
+        st.subheader("📚 ربط المواد بالمعلمين")
+        st.info("هنا بنحدد مين بيدرس إيه عشان يظهر في صفحة المعلم")
+        
+        # جلب المعلمين للاختيار
+        teachers_df = get_sheet_data("Teachers_Main")
+        if not teachers_df.empty:
+            t_dict = dict(zip(teachers_df['Name'], teachers_df['Code']))
+            selected_t_name = st.selectbox("اختار المعلم", list(t_dict.keys()))
+            subject_name = st.text_input("اسم المادة")
+            year_level = st.selectbox("للفرقة", [1, 2, 3, 4])
             
-            if st.button("دخول المعلم"):
-                df_t = get_data(sheet, "Teachers_Main")
-                if not df_t.empty:
-                    df_t['Code'] = df_t['Code'].astype(str)
-                    df_t['Password'] = df_t['Password'].astype(str)
-                    
-                    teacher = df_t[(df_t['Code'] == t_code_in) & (df_t['Password'] == t_pass_in)]
-                    if not teacher.empty:
-                        st.session_state['logged_in_teacher'] = teacher.iloc[0].to_dict()
+            if st.button("إسناد المادة"):
+                client = get_client()
+                sheet = client.open(SHEET_NAME)
+                try: ws_sub = sheet.worksheet("Subjects_Data")
+                except: ws_sub = sheet.add_worksheet("Subjects_Data", 1000, 3)
+                
+                ws_sub.append_row([subject_name, t_dict[selected_t_name], year_level])
+                st.success(f"تم إسناد مادة {subject_name} للمعلم {selected_t_name}")
+
+def teacher_dashboard():
+    user = st.session_state['user_info']
+    st.title(f"👨‍🏫 بوابة عضو هيئة التدريس: {user['Name']}")
+    st.write(f"كود المعلم: `{user['Code']}`")
+    
+    st.divider()
+    st.subheader("📋 موادي الدراسية")
+    
+    # جلب المواد الخاصة بهذا المعلم
+    df_sub = get_sheet_data("Subjects_Data")
+    if not df_sub.empty:
+        # فلترة المواد
+        my_subjects = df_sub[df_sub['Teacher_Code'].astype(str) == str(user['Code'])]
+        
+        if not my_subjects.empty:
+            for idx, row in my_subjects.iterrows():
+                with st.expander(f"مادة: {row['Subject']} (الفرقة {row['Year']})"):
+                    st.write("أدوات التحكم:")
+                    # هنا ممكن نضيف أدوات رصد الدرجات
+                    st.text_input(f"بحث عن طالب في {row['Subject']}", key=f"search_{idx}")
+                    st.button(f"رصد درجات {row['Subject']}", key=f"btn_{idx}")
+        else:
+            st.info("لا توجد مواد مسندة إليك حالياً. تواصل مع الإدارة.")
+    else:
+        st.warning("لم يتم إعداد جدول المواد بعد.")
+        
+    st.divider()
+    if st.button("تسجيل الخروج", type="primary"):
+        st.session_state['user_role'] = None
+        st.session_state['user_info'] = None
+        st.rerun()
+
+def student_dashboard():
+    user = st.session_state['user_info']
+    st.title(f"🎓 بوابة الطالب: {user['Name']}")
+    
+    col1, col2 = st.columns(2)
+    col1.metric("الفرقة الدراسية", user['Year'])
+    
+    # جلب البيانات المالية
+    try: year = int(user['Year'])
+    except: year = 1
+    total_fees = BASE_FEES
+    for _ in range(1, year): total_fees += total_fees * 0.10
+    total_fees = int(total_fees)
+    paid = int(user['Paid_Tuition']) if str(user['Paid_Tuition']).isdigit() else 0
+    
+    col2.metric("الموقف المالي", f"{total_fees - paid} ج.م (متبقي)")
+    
+    st.divider()
+    st.subheader("📂 ملفك الشخصي")
+    
+    # عرض الشيت الخاص
+    client = get_client()
+    try:
+        sheet = client.open(SHEET_NAME)
+        ws = sheet.worksheet(str(user['Code']))
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # تحويل الروابط لأزرار
+        st.dataframe(
+            df, 
+            column_config={"Link": st.column_config.LinkColumn("رابط", display_text="🔗 فتح")},
+            use_container_width=True
+        )
+    except:
+        st.info("الملف الشخصي قيد الإعداد...")
+
+    st.divider()
+    if st.button("تسجيل الخروج", type="primary"):
+        st.session_state['user_role'] = None
+        st.session_state['user_info'] = None
+        st.rerun()
+
+# --- 7. الصفحة الرئيسية (المدخل) ---
+
+def main():
+    # لو المستخدم مسجل دخول، نوجهه لصفحته علطول
+    if st.session_state['user_role'] == "Admin":
+        admin_dashboard()
+        return
+    elif st.session_state['user_role'] == "Teacher":
+        teacher_dashboard()
+        return
+    elif st.session_state['user_role'] == "Student":
+        student_dashboard()
+        return
+
+    # صفحة تسجيل الدخول (Landing Page)
+    c1, c2 = st.columns([1, 2])
+    
+    with c1:
+        st.image("https://cdn-icons-png.flaticon.com/512/2942/2942544.png", width=150)
+        st.title("بوابة المعاهد")
+        st.write("نظام الإدارة الإلكتروني الموحد")
+    
+    with c2:
+        tab_login_s, tab_login_t, tab_login_a = st.tabs(["دخول الطلاب", "دخول المعلمين", "الإدارة"])
+        
+        with tab_login_s:
+            with st.form("login_s"):
+                code_s = st.text_input("كود الطالب")
+                pass_s = st.text_input("كلمة المرور", type="password")
+                if st.form_submit_button("دخول 🎓"):
+                    user = login_logic(code_s, pass_s, "Student")
+                    if user:
+                        st.session_state['user_role'] = "Student"
+                        st.session_state['user_info'] = user
+                        st.success("تم الدخول بنجاح!")
+                        time.sleep(1)
                         st.rerun()
                     else:
                         st.error("بيانات غير صحيحة")
-        else:
-            # المعلم مسجل دخول
-            teacher_data = st.session_state['logged_in_teacher']
-            t_code = str(teacher_data['Code'])
-            st.title(f"أهلاً د/ {teacher_data['Name']}")
-            st.caption(f"Code: {t_code}")
-            
-            st.divider()
-            
-            # 1. جلب المواد الخاصة بهذا المعلم فقط
-            st.subheader("📚 موادي الدراسية")
-            
-            df_subjects = get_data(sheet, "Subjects_Data")
-            
-            if not df_subjects.empty and 'Teacher_Code' in df_subjects.columns:
-                # فلترة المواد للكود ده بس
-                df_subjects['Teacher_Code'] = df_subjects['Teacher_Code'].astype(str)
-                my_subjects = df_subjects[df_subjects['Teacher_Code'] == t_code]
-                
-                if not my_subjects.empty:
-                    # قائمة منسدلة لاختيار المادة
-                    subject_list = my_subjects['Subject_Name'].tolist()
-                    selected_subject = st.selectbox("اختر المادة للتحكم:", subject_list)
-                    
-                    # لما يختار مادة، نظهر تفاصيلها أو طلابها
-                    st.info(f"أنت الآن تتحكم في مادة: **{selected_subject}**")
-                    
-                    # محاكاة لرصد الدرجات
-                    with st.expander("رصد درجات طالب"):
-                        stud_code_grade = st.text_input("كود الطالب")
-                        grade_val = st.radio("النتيجة", ["ناجح", "راسب"])
-                        if st.button("حفظ النتيجة"):
-                            # هنا ممكن نكتب في شيت الطالب
-                            try:
-                                ws_s = sheet.worksheet(stud_code_grade)
-                                ws_s.append_row(["نتيجة مادة", selected_subject, grade_val, str(datetime.now())])
-                                st.success(f"تم رصد {grade_val} للطالب في {selected_subject}")
-                            except:
-                                st.error("تأكد من كود الطالب")
-                else:
-                    st.warning("لا توجد مواد مسندة إليك في الجدول (Subjects_Data). يرجى مراجعة الإدارة.")
-            else:
-                st.error("جدول المواد (Subjects_Data) غير موجود أو فارغ.")
-                
-            st.divider()
-            if st.button("تسجيل خروج المعلم"):
-                st.session_state['logged_in_teacher'] = None
-                st.rerun()
 
-    # ------------------------- البحث -------------------------
-    elif menu == "البحث والاستعلام":
-        st.header("🔍 استعلام إداري")
-        q = st.text_input("بحث (الاسم أو الكود)")
-        if q:
-            df = get_data(sheet, "Students_Main")
-            if not df.empty:
-                df = df.astype(str)
-                res = df[df['Code'].str.contains(q, case=False) | df['Name'].str.contains(q, case=False)]
-                
-                if not res.empty:
-                    for i, r in res.iterrows():
-                        with st.expander(f"{r['Name']} - {r['Code']}"):
-                            st.write(f"الفرقة: {r['Year']}")
-                            st.write(f"المدفوع: {r['Paid_Tuition']}")
-                            st.write(f"الباسوورد: {r['Password']}")
-                else:
-                    st.warning("لا توجد نتائج")
+        with tab_login_t:
+            with st.form("login_t"):
+                code_t = st.text_input("كود المعلم")
+                pass_t = st.text_input("كلمة المرور", type="password")
+                if st.form_submit_button("دخول 👨‍🏫"):
+                    user = login_logic(code_t, pass_t, "Teacher")
+                    if user:
+                        st.session_state['user_role'] = "Teacher"
+                        st.session_state['user_info'] = user
+                        st.success("أهلاً بك يا دكتور!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("بيانات غير صحيحة")
+        
+        with tab_login_a:
+            with st.form("login_a"):
+                user_a = st.text_input("اسم المستخدم")
+                pass_a = st.text_input("كلمة المرور", type="password")
+                if st.form_submit_button("دخول الإدارة 🔒"):
+                    # باسوورد ثابت للإدارة (ممكن تغيره)
+                    if user_a == "admin" and pass_a == "admin123":
+                        st.session_state['user_role'] = "Admin"
+                        st.rerun()
+                    else:
+                        st.error("خطأ في صلاحيات الإدارة")
 
 if __name__ == '__main__':
     main()
