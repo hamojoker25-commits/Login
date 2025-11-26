@@ -5,7 +5,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import random
 import string
 from datetime import datetime
-import json
+import time
 
 # --- إعدادات الصفحة ---
 st.set_page_config(page_title="نظام المعاهد العليا", layout="wide", page_icon="🎓")
@@ -14,6 +14,14 @@ st.set_page_config(page_title="نظام المعاهد العليا", layout="wi
 SHEET_NAME = "users_database"
 BASE_FEES = 18000
 BOOK_FEES = {1: 2000, 2: 2500, 3: 3000, 4: 3500}
+
+# --- تهيئة الـ Session State (لحل مشكلة إعادة التحميل) ---
+if 'logged_in_student' not in st.session_state:
+    st.session_state['logged_in_student'] = None
+if 'logged_in_teacher' not in st.session_state:
+    st.session_state['logged_in_teacher'] = None
+if 'current_menu' not in st.session_state:
+    st.session_state['current_menu'] = "الرئيسية"
 
 # --- الاتصال بجوجل شيت ---
 @st.cache_resource
@@ -34,7 +42,14 @@ def connect_google_sheet():
         st.error(f"خطأ في الاتصال: {e}")
         return None
 
-# --- دوال مساعدة ---
+# --- دوال مساعدة (Safe Functions لمنع الـ ValueError) ---
+def safe_int(value):
+    """تحويل آمن للنصوص إلى أرقام صحيحة"""
+    try:
+        return int(float(str(value).replace(',', '').strip()))
+    except:
+        return 0
+
 def get_data(sheet_obj, worksheet_name):
     try:
         ws = sheet_obj.worksheet(worksheet_name)
@@ -42,57 +57,50 @@ def get_data(sheet_obj, worksheet_name):
     except:
         return pd.DataFrame()
 
-def generate_code(prefix, length, is_digits_only=False):
-    if is_digits_only:
-        chars = string.digits
-    else:
-        chars = string.digits
-    
-    # توليد الجزء الرقمي
+def generate_code(prefix, length):
     digits = ''.join(random.choices(string.digits, k=length))
-    
-    if prefix == "T": # للمعلم حرفين كابتل
+    if prefix == "T": # معلم: حرفين كابتل + 8 أرقام
         caps = ''.join(random.choices(string.ascii_uppercase, k=2))
         return caps + digits
-    elif prefix == "S": # للطالب حرف كابتل
+    elif prefix == "S": # طالب: حرف كابتل + 7 أرقام
         cap = random.choice(string.ascii_uppercase)
         return cap + digits
     return digits
 
 def calculate_tuition(year):
     fees = BASE_FEES
-    for _ in range(1, int(year)):
-        fees += fees * 0.10 # زيادة 10% مركبة
+    # حساب مركب: كل سنة تزيد 10% عن السنة السابقة
+    for _ in range(1, safe_int(year)):
+        fees += fees * 0.10
     return int(fees)
 
 # --- الوظائف الرئيسية ---
 
 def register_student(data_dict, sheet):
     ws_main = sheet.worksheet("Students_Main")
-    existing_codes = ws_main.col_values(1)
+    try:
+        existing_codes = ws_main.col_values(1)
+    except:
+        existing_codes = []
     
     while True:
         new_code = generate_code("S", 7)
         if new_code not in existing_codes:
             break
             
-    # توليد باسوورد
-    password = generate_code("S", 7) # حرف و7 أرقام
+    password = generate_code("S", 7)
     
-    # تجهيز حالة المواد (كلها Pending في البداية)
-    # نفترض وجود مواد افتراضية لكل فرقة، هنا هنحطها فاضية لحد ما الإدارة تحددها
-    subjects_status = "{}" 
-    
+    # الترتيب مهم جداً عشان الخزينة تقرأ صح
+    # Paid_Tuition رقم 18 (index 17) | Paid_Books رقم 19 (index 18)
     row = [
         new_code, data_dict['name'], password, data_dict['dob'], data_dict['gov'], 
         data_dict['address'], data_dict['nat'], data_dict['nid'], data_dict['nid_source'],
         data_dict['religion'], data_dict['cert'], data_dict['cert_date'], data_dict['seat_num'],
-        data_dict['total_score'], data_dict['major'], 1, # الفرقة الأولى افتراضياً
-        str(datetime.now()), 0, 0, subjects_status # مدفوع مصاريف، مدفوع كتب، حالة المواد
+        data_dict['total_score'], data_dict['major'], 1, # Year
+        str(datetime.now()), 0, 0, "{}" # Paid Tuition, Paid Books, Subjects JSON
     ]
     ws_main.append_row(row)
     
-    # إنشاء شيت خاص
     try:
         ws_user = sheet.add_worksheet(title=new_code, rows="100", cols="10")
         ws_user.append_row(["البيان", "التفاصيل", "الرابط/ملاحظات", "التاريخ"])
@@ -107,25 +115,37 @@ def register_teacher(data_dict, sheet):
         ws_main = sheet.worksheet("Teachers_Main")
     except:
         ws_main = sheet.add_worksheet("Teachers_Main", 1000, 20)
-        ws_main.append_row(["Code", "Name", "Password", "Data", "Subjects"])
+        ws_main.append_row(["Code", "Name", "Password", "DOB", "Nat", "Religion", "Gov", "Address", "Email", "NID", "NID_Source"])
 
-    existing_codes = ws_main.col_values(1)
+    try:
+        existing_codes = ws_main.col_values(1)
+    except:
+        existing_codes = []
+
     while True:
-        new_code = generate_code("T", 8)
+        # كود المعلم: حرفين كابتل + 8 أرقام
+        digits = ''.join(random.choices(string.digits, k=8))
+        caps = ''.join(random.choices(string.ascii_uppercase, k=2))
+        new_code = caps + digits
         if new_code not in existing_codes:
             break
             
-    # باسوورد المعلم (حرفين و8 أرقام مختلفين)
-    password = ''.join(random.choices(string.ascii_uppercase, k=2)) + ''.join(random.choices(string.digits, k=8))
+    # باسوورد المعلم (حرفين و8 أرقام مختلفين عن الكود)
+    pwd_digits = ''.join(random.choices(string.digits, k=8))
+    pwd_caps = ''.join(random.choices(string.ascii_uppercase, k=2))
+    password = pwd_caps + pwd_digits
     
     row = [
-        new_code, data_dict['name'], password, str(data_dict), ""
+        new_code, data_dict['name'], password, data_dict['dob'], data_dict['nat'],
+        data_dict['religion'], data_dict['gov'], data_dict['address'], 
+        data_dict['email'], data_dict['nid'], data_dict['nid_source']
     ]
     ws_main.append_row(row)
     
     # إنشاء شيت خاص للمعلم
     try:
         sheet.add_worksheet(title=new_code, rows="100", cols="10")
+        sheet.worksheet(new_code).append_row(["الملاحظات", "التاريخ"])
     except:
         pass
         
@@ -136,20 +156,24 @@ def process_payment(student_code, amount, pay_type, visa_details, sheet, payment
     cell = ws.find(student_code)
     row_num = cell.row
     
-    # تحديث المبلغ المدفوع
-    # العمود 17 للمصاريف، 18 للكتب (حسب ترتيب التسجيل)
-    col_idx = 17 if payment_category == "tuition" else 18
-    current_val = ws.cell(row_num, col_idx).value
-    new_val = int(current_val) + int(amount)
+    # استخدام safe_int لمنع الـ ValueError
+    col_idx = 18 if payment_category == "tuition" else 19
+    current_val_raw = ws.cell(row_num, col_idx).value
+    current_val = safe_int(current_val_raw)
+    
+    new_val = current_val + safe_int(amount)
     ws.update_cell(row_num, col_idx, new_val)
     
-    # تسجيل العملية في شيت الطالب
-    ws_student = sheet.worksheet(student_code)
-    note = f"دفع {payment_category} - {pay_type}"
-    if pay_type == "Visa":
-        note += f" (Visa Ends: {visa_details[-4:]})"
-    
-    ws_student.append_row(["عملية دفع", f"{amount} ج.م", note, str(datetime.now())])
+    # تسجيل في شيت الطالب
+    try:
+        ws_student = sheet.worksheet(student_code)
+        note = f"دفع {payment_category} - {pay_type}"
+        if pay_type == "فيزا" and visa_details:
+            note += f" (Visa Ends: {visa_details[-4:]})"
+        
+        ws_student.append_row(["عملية دفع", f"{amount} ج.م", note, str(datetime.now())])
+    except:
+        pass # لو شيت الطالب مش موجود لسبب ما
     return True
 
 # --- الواجهة الرئيسية ---
@@ -159,7 +183,7 @@ def main():
     if not sheet:
         st.stop()
         
-    # التأكد من وجود الشيتات الأساسية
+    # التأكد من وجود الشيتات الأساسية (الطلاب، المعلمين، المواد)
     try:
         sheet.worksheet("Students_Main")
     except:
@@ -167,26 +191,39 @@ def main():
         ws.append_row(["Code", "Name", "Password", "DOB", "Gov", "Address", "Nat", "NID", "NID_Source", 
                        "Religion", "Cert", "Cert_Date", "Seat_Num", "Score", "Major", "Year", 
                        "Join_Date", "Paid_Tuition", "Paid_Books", "Subjects_Status"])
+    
+    try:
+        sheet.worksheet("Subjects_Data")
+    except:
+        ws_sub = sheet.add_worksheet("Subjects_Data", 1000, 5)
+        ws_sub.append_row(["Subject_Name", "Year", "Term", "Teacher_Code"])
 
-    # القائمة الجانبية
+    # القائمة الجانبية (Navigation)
     st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2942/2942544.png", width=100)
     st.sidebar.title("نظام المعاهد العليا")
     
-    menu = st.sidebar.radio("القائمة", 
-        ["الرئيسية", "شؤون الطلاب (تسجيل)", "شؤون المعلمين", "الخزينة (دفع المصاريف)", "بوابة الطالب", "بوابة المعلم", "البحث والاستعلام"])
+    # استخدام Session State للتحكم في القائمة عشان الصفحة ما تعملش Reload وترجع للأول
+    menu_options = ["الرئيسية", "شؤون الطلاب (تسجيل)", "شؤون المعلمين", "الخزينة (دفع المصاريف)", "بوابة الطالب", "بوابة المعلم", "البحث والاستعلام"]
+    
+    # زرار للقائمة
+    selected_menu = st.sidebar.radio("القائمة", menu_options, index=menu_options.index(st.session_state['current_menu']))
+    
+    # تحديث الحالة لو المستخدم اختار حاجة جديدة
+    if selected_menu != st.session_state['current_menu']:
+        st.session_state['current_menu'] = selected_menu
+        st.rerun()
+
+    menu = st.session_state['current_menu']
 
     if menu == "الرئيسية":
         st.title("🏛️ نظام إدارة المعاهد العليا")
-        st.info("مرحباً بك في النظام المتكامل. يرجى اختيار القسم من القائمة الجانبية.")
+        st.info("مرحباً بك في النظام المتكامل.")
         
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("عدد الطلاب المسجلين", len(get_data(sheet, "Students_Main")))
+            st.metric("الطلاب", len(get_data(sheet, "Students_Main")))
         with c2:
-            try:
-                st.metric("عدد المعلمين", len(get_data(sheet, "Teachers_Main")))
-            except:
-                st.metric("عدد المعلمين", 0)
+            st.metric("المعلمين", len(get_data(sheet, "Teachers_Main")))
 
     # ------------------------- شؤون الطلاب -------------------------
     elif menu == "شؤون الطلاب (تسجيل)":
@@ -229,31 +266,59 @@ def main():
                         "cert": cert, "cert_date": str(cert_date), "seat_num": seat_num,
                         "total_score": total, "major": major
                     }
-                    with st.spinner("جاري إنشاء ملف الطالب..."):
+                    with st.spinner("جاري التسجيل..."):
                         code, pwd = register_student(data, sheet)
                     
                     st.success("تم تسجيل الطالب بنجاح! ✅")
                     st.info(f"👤 كود الطالب: {code}")
-                    st.warning(f"🔑 كلمة المرور المبدئية: {pwd}")
+                    st.warning(f"🔑 كلمة المرور: {pwd}")
                 else:
                     st.error("يرجى إكمال البيانات الأساسية")
 
-    # ------------------------- شؤون المعلمين -------------------------
+    # ------------------------- شؤون المعلمين (تعديل كامل) -------------------------
     elif menu == "شؤون المعلمين":
         st.header("👨‍🏫 تسجيل معلم جديد")
-        with st.form("new_teacher"):
-            name = st.text_input("الاسم رباعي")
-            # باقي البيانات...
-            submit = st.form_submit_button("تسجيل المعلم")
+        st.caption("أدخل البيانات كاملة لإنشاء ملف المعلم")
+        
+        with st.form("new_teacher_full"):
+            t1, t2 = st.columns(2)
+            t_name = t1.text_input("الاسم كامل")
+            t_dob = t2.date_input("تاريخ الميلاد", min_value=datetime(1960,1,1))
             
-            if submit and name:
-                data = {"name": name} # يمكن إضافة باقي الحقول
-                code, pwd = register_teacher(data, sheet)
-                st.success(f"تم التسجيل. كود: {code} | باسوورد: {pwd}")
+            t3, t4 = st.columns(2)
+            t_nat = t3.text_input("الجنسية", "مصر")
+            t_rel = t4.selectbox("الديانة", ["مسلم", "مسيحي"])
+            
+            t5, t6 = st.columns(2)
+            t_gov = t5.text_input("المحافظة")
+            t_addr = t6.text_input("العنوان")
+            
+            t7, t8 = st.columns(2)
+            t_email = t7.text_input("البريد الإلكتروني")
+            t_nid = t8.text_input("الرقم القومي")
+            
+            t_nid_src = st.text_input("جهة إصدار الرقم القومي")
+            
+            t_submit = st.form_submit_button("تسجيل المعلم")
+            
+            if t_submit:
+                if t_name and t_nid:
+                    data = {
+                        "name": t_name, "dob": str(t_dob), "nat": t_nat, "religion": t_rel,
+                        "gov": t_gov, "address": t_addr, "email": t_email, 
+                        "nid": t_nid, "nid_source": t_nid_src
+                    }
+                    with st.spinner("جاري إنشاء حساب المعلم..."):
+                        code, pwd = register_teacher(data, sheet)
+                    st.success("تم تسجيل المعلم بنجاح! ✅")
+                    st.info(f"👨‍🏫 كود المعلم: {code}")
+                    st.warning(f"🔑 كلمة المرور: {pwd}")
+                else:
+                    st.error("الاسم والرقم القومي مطلوبان")
 
-    # ------------------------- الخزينة -------------------------
+    # ------------------------- الخزينة (حل مشكلة ValueError) -------------------------
     elif menu == "الخزينة (دفع المصاريف)":
-        st.header("💰 الخزينة وتحصيل المصروفات")
+        st.header("💰 الخزينة")
         
         tab1, tab2 = st.tabs(["مصاريف دراسية", "كتب دراسية"])
         
@@ -263,193 +328,213 @@ def main():
             
             if s_code:
                 df = get_data(sheet, "Students_Main")
-                student = df[df['Code'] == s_code]
-                
-                if not student.empty:
-                    st.success(f"الطالب: {student.iloc[0]['Name']}")
-                    year = int(student.iloc[0]['Year'])
-                    paid = int(student.iloc[0]['Paid_Tuition'])
+                if not df.empty and 'Code' in df.columns:
+                    # تحويل الكود لنص للمقارنة
+                    df['Code'] = df['Code'].astype(str)
+                    student = df[df['Code'] == str(s_code)]
                     
-                    # حساب المستحق
-                    total_due = calculate_tuition(year)
-                    remaining = total_due - paid
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("الفرقة", year)
-                    c2.metric("المستحق إجمالاً", f"{total_due:,}")
-                    c3.metric("المتبقي", f"{remaining:,}", delta_color="inverse")
-                    
-                    pay_method = st.radio("طريقة الدفع", ["كاش", "فيزا"])
-                    visa_info = ""
-                    
-                    if pay_method == "فيزا":
-                        v_num = st.text_input("رقم الفيزا", type="password")
-                        if v_num:
-                            visa_info = v_num
+                    if not student.empty:
+                        row_data = student.iloc[0]
+                        st.success(f"الطالب: {row_data['Name']}")
+                        
+                        year = safe_int(row_data['Year'])
+                        paid = safe_int(row_data['Paid_Tuition'])
+                        
+                        total_due = calculate_tuition(year)
+                        remaining = total_due - paid
+                        
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("الفرقة", year)
+                        c2.metric("المستحق", f"{total_due:,}")
+                        c3.metric("المتبقي", f"{remaining:,}", delta_color="inverse")
+                        
+                        pay_method = st.radio("طريقة الدفع", ["كاش", "فيزا"])
+                        visa_info = ""
+                        if pay_method == "فيزا":
+                            v_num = st.text_input("رقم الفيزا (للتوثيق فقط)", type="password")
+                            if v_num: visa_info = v_num
                             
-                    pay_amount = st.number_input("المبلغ المراد دفعه", min_value=1, max_value=int(remaining) if remaining > 0 else 1)
-                    
-                    if st.button("تأكيد الدفع"):
-                        if remaining <= 0:
-                            st.warning("تم سداد كامل المصروفات مسبقاً.")
-                        else:
-                            process_payment(s_code, pay_amount, pay_method, visa_info, sheet, "tuition")
-                            st.balloons()
-                            st.success("تمت العملية بنجاح!")
-                            st.rerun()
+                        amount = st.number_input("المبلغ", min_value=1, max_value=int(remaining) if remaining > 0 else 1000000)
+                        
+                        if st.button("تأكيد الدفع"):
+                            if remaining <= 0:
+                                st.warning("لا يوجد مستحقات.")
+                            else:
+                                process_payment(s_code, amount, pay_method, visa_info, sheet, "tuition")
+                                st.balloons()
+                                st.success("تم الدفع!")
+                                time.sleep(1)
+                                st.rerun()
+                    else:
+                        st.error("كود غير صحيح")
                 else:
-                    st.error("كود غير صحيح")
+                    st.error("قاعدة البيانات فارغة أو بها مشكلة")
 
         with tab2:
-            st.subheader("دفع مصاريف الكتب (كاش فقط)")
+            st.subheader("دفع مصاريف الكتب (كاش)")
             b_code = st.text_input("كود الطالب", key="book_fees")
             if b_code:
                 df = get_data(sheet, "Students_Main")
-                stud = df[df['Code'] == b_code]
-                if not stud.empty:
-                    yr = int(stud.iloc[0]['Year'])
-                    book_fee = BOOK_FEES.get(yr, 0)
-                    paid_book = int(stud.iloc[0]['Paid_Books'])
+                if not df.empty and 'Code' in df.columns:
+                    df['Code'] = df['Code'].astype(str)
+                    stud = df[df['Code'] == str(b_code)]
                     
-                    st.write(f"الطالب: {stud.iloc[0]['Name']} - الفرقة: {yr}")
-                    st.write(f"تكلفة الكتب: {book_fee}")
-                    
-                    if paid_book >= book_fee:
-                        st.success("✅ تم استلام الكتب ودفع المصاريف بالكامل.")
-                        # هنا بنعرض الباسوورد والكود زي ما طلبت
-                        st.info(f"بيانات الدخول للطالب:\nالكود: {b_code}\nالباسوورد: {stud.iloc[0]['Password']}")
-                    else:
-                        if st.button(f"دفع {book_fee} جنيه (كاش)"):
-                            process_payment(b_code, book_fee, "Cash", "", sheet, "books")
-                            st.success("تم الدفع! يظهر الآن بيانات الدخول...")
-                            st.rerun()
+                    if not stud.empty:
+                        row = stud.iloc[0]
+                        yr = safe_int(row['Year'])
+                        book_fee = BOOK_FEES.get(yr, 0)
+                        paid_book = safe_int(row['Paid_Books'])
+                        
+                        st.write(f"الطالب: {row['Name']} - الفرقة: {yr}")
+                        
+                        if paid_book >= book_fee:
+                            st.success("✅ الكتب مدفوعة بالكامل.")
+                            st.info(f"بيانات الدخول:\nالكود: {b_code}\nالباسوورد: {row['Password']}")
+                        else:
+                            st.metric("المطلوب للكتب", f"{book_fee} ج.م")
+                            if st.button("تأكيد الدفع (كاش)"):
+                                process_payment(b_code, book_fee, "Cash", "", sheet, "books")
+                                st.success("تم الدفع!")
+                                time.sleep(1)
+                                st.rerun()
 
     # ------------------------- بوابة الطالب -------------------------
     elif menu == "بوابة الطالب":
-        if 'student_user' not in st.session_state:
+        # لو مش مسجل دخول، اظهر شاشة الدخول
+        if st.session_state['logged_in_student'] is None:
             st.header("🔐 دخول الطالب")
             code = st.text_input("كود الطالب")
             pas = st.text_input("كلمة المرور", type="password")
+            
             if st.button("دخول"):
                 df = get_data(sheet, "Students_Main")
-                # تحويل الأعمدة لنصوص للمقارنة
-                df['Code'] = df['Code'].astype(str)
-                df['Password'] = df['Password'].astype(str)
-                
-                user = df[(df['Code'] == code) & (df['Password'] == pas)]
-                if not user.empty:
-                    st.session_state['student_user'] = user.iloc[0]
-                    st.rerun()
-                else:
-                    st.error("بيانات خطأ")
+                if not df.empty:
+                    df['Code'] = df['Code'].astype(str)
+                    df['Password'] = df['Password'].astype(str)
+                    user = df[(df['Code'] == code) & (df['Password'] == pas)]
+                    
+                    if not user.empty:
+                        st.session_state['logged_in_student'] = user.iloc[0].to_dict()
+                        st.rerun()
+                    else:
+                        st.error("بيانات خطأ")
         else:
-            u = st.session_state['student_user']
+            # لو مسجل دخول، اظهر بياناته
+            u = st.session_state['logged_in_student']
             st.title(f"مرحباً، {u['Name']}")
             
-            # حسابات سريعة
-            yr = int(u['Year'])
-            total_fee = calculate_tuition(yr)
-            paid = int(u['Paid_Tuition'])
+            # تحديث البيانات من الشيت مباشرة عشان لو حصل دفع
+            # (اختياري: ممكن نعمل استعلام جديد هنا للتأكد من أحدث رصيد)
             
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("الفرقة الدراسية", yr)
-            c2.metric("المصاريف المدفوعة", paid)
-            c3.metric("المتبقي عليك", total_fee - paid)
-            c4.metric("تاريخ الانضمام", str(u['Join_Date'])[:10])
+            yr = safe_int(u['Year'])
+            total = calculate_tuition(yr)
+            paid = safe_int(u['Paid_Tuition'])
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("الفرقة", yr)
+            c2.metric("المدفوع", paid)
+            c3.metric("المتبقي", total - paid)
             
             st.divider()
-            st.subheader(f"📄 ملفك الأكاديمي ({u['Code']})")
-            
-            # عرض الشيت الخاص
+            st.subheader("📂 ملفاتك ودرجاتك")
             try:
-                ws_priv = sheet.worksheet(str(u['Code']))
-                data = ws_priv.get_all_records()
-                
-                # تحويل الروابط
-                df_priv = pd.DataFrame(data)
-                
-                # إعدادات الأعمدة (لإظهار الروابط)
-                column_config = {}
-                for col in df_priv.columns:
-                    if "Link" in col or "رابط" in col:
-                         column_config[col] = st.column_config.LinkColumn(display_text="🔗 فتح")
-
-                st.dataframe(df_priv, use_container_width=True, column_config=column_config)
-                st.caption("لأي استفسار بخصوص الدرجات أو الروابط، يرجى مراجعة قسم IT.")
+                ws = sheet.worksheet(str(u['Code']))
+                data = ws.get_all_records()
+                st.dataframe(data, use_container_width=True)
             except:
-                st.warning("جاري تحديث ملفك...")
-
-            if st.button("تسجيل خروج"):
-                del st.session_state['student_user']
+                st.info("الملف قيد التجهيز")
+                
+            if st.button("خروج"):
+                st.session_state['logged_in_student'] = None
                 st.rerun()
 
-    # ------------------------- بوابة المعلم -------------------------
+    # ------------------------- بوابة المعلم (التعديل الجبار) -------------------------
     elif menu == "بوابة المعلم":
-        st.header("👨‍🏫 بوابة أعضاء هيئة التدريس")
-        # (يمكنك إضافة منطق تسجيل دخول المعلم هنا بنفس طريقة الطالب)
-        # للتسهيل سأضع محاكاة للكنترول
-        
-        st.info("نظام الكنترول ورصد الدرجات")
-        t_code = st.text_input("كود المعلم")
-        t_pass = st.text_input("كلمة المرور", type="password")
-        
-        if st.button("دخول للكنترول"):
-            # تحقق وهمي (يجب ربطه بجدول Teachers_Main)
-            st.success("تم الدخول. اختر المادة:")
+        # التحقق من الدخول
+        if st.session_state['logged_in_teacher'] is None:
+            st.header("👨‍🏫 بوابة المعلمين")
+            t_code_in = st.text_input("كود المعلم")
+            t_pass_in = st.text_input("كلمة المرور", type="password")
             
-            subject = st.selectbox("المادة", ["مقدمة حاسب", "رياضيات 1", "إدارة"])
-            stud_code_input = st.text_input("كود الطالب للرصد")
-            status = st.radio("الحالة", ["ناجح", "راسب"])
-            
-            if st.button("رصد النتيجة"):
-                # هنا المنطق المعقد:
-                # 1. نجيب الطالب
-                # 2. نجيب الـ JSON بتاع المواد Subjects_Status
-                # 3. نحدث المادة دي
-                # 4. نتأكد هل كل مواد السنة دي "ناجح"؟ لو اه -> زود Year + 1
-                
-                df = get_data(sheet, "Students_Main")
-                cell = sheet.worksheet("Students_Main").find(stud_code_input)
-                
-                if cell:
-                    # قراءة الحالة الحالية
-                    # (هذا الجزء يحتاج منطق JSON متقدم سأبسطه)
-                    st.success(f"تم رصد {status} للطالب في مادة {subject}")
+            if st.button("دخول المعلم"):
+                df_t = get_data(sheet, "Teachers_Main")
+                if not df_t.empty:
+                    df_t['Code'] = df_t['Code'].astype(str)
+                    df_t['Password'] = df_t['Password'].astype(str)
                     
-                    # محاكاة الترحيل (لو ناجح ننقله فرقة)
-                    # if check_all_passed(stud_code_input):
-                    #    update_year(stud_code_input)
+                    teacher = df_t[(df_t['Code'] == t_code_in) & (df_t['Password'] == t_pass_in)]
+                    if not teacher.empty:
+                        st.session_state['logged_in_teacher'] = teacher.iloc[0].to_dict()
+                        st.rerun()
+                    else:
+                        st.error("بيانات غير صحيحة")
+        else:
+            # المعلم مسجل دخول
+            teacher_data = st.session_state['logged_in_teacher']
+            t_code = str(teacher_data['Code'])
+            st.title(f"أهلاً د/ {teacher_data['Name']}")
+            st.caption(f"Code: {t_code}")
+            
+            st.divider()
+            
+            # 1. جلب المواد الخاصة بهذا المعلم فقط
+            st.subheader("📚 موادي الدراسية")
+            
+            df_subjects = get_data(sheet, "Subjects_Data")
+            
+            if not df_subjects.empty and 'Teacher_Code' in df_subjects.columns:
+                # فلترة المواد للكود ده بس
+                df_subjects['Teacher_Code'] = df_subjects['Teacher_Code'].astype(str)
+                my_subjects = df_subjects[df_subjects['Teacher_Code'] == t_code]
+                
+                if not my_subjects.empty:
+                    # قائمة منسدلة لاختيار المادة
+                    subject_list = my_subjects['Subject_Name'].tolist()
+                    selected_subject = st.selectbox("اختر المادة للتحكم:", subject_list)
+                    
+                    # لما يختار مادة، نظهر تفاصيلها أو طلابها
+                    st.info(f"أنت الآن تتحكم في مادة: **{selected_subject}**")
+                    
+                    # محاكاة لرصد الدرجات
+                    with st.expander("رصد درجات طالب"):
+                        stud_code_grade = st.text_input("كود الطالب")
+                        grade_val = st.radio("النتيجة", ["ناجح", "راسب"])
+                        if st.button("حفظ النتيجة"):
+                            # هنا ممكن نكتب في شيت الطالب
+                            try:
+                                ws_s = sheet.worksheet(stud_code_grade)
+                                ws_s.append_row(["نتيجة مادة", selected_subject, grade_val, str(datetime.now())])
+                                st.success(f"تم رصد {grade_val} للطالب في {selected_subject}")
+                            except:
+                                st.error("تأكد من كود الطالب")
                 else:
-                    st.error("طالب غير موجود")
-
-    # ------------------------- البحث والاستعلام -------------------------
-    elif menu == "البحث والاستعلام":
-        st.header("🔍 البحث عن طالب")
-        query = st.text_input("اكتب الاسم أو الكود")
-        
-        if query:
-            df = get_data(sheet, "Students_Main")
-            # تحويل البيانات لنص للبحث
-            df = df.astype(str)
-            
-            # البحث في الكود أو الاسم
-            results = df[df['Code'].str.contains(query, case=False) | df['Name'].str.contains(query, case=False)]
-            
-            if not results.empty:
-                for index, row in results.iterrows():
-                    with st.expander(f"{row['Name']} ({row['Code']})"):
-                        yr = int(row['Year'])
-                        due = calculate_tuition(yr)
-                        paid = int(float(row['Paid_Tuition']))
-                        
-                        c1, c2, c3 = st.columns(3)
-                        c1.write(f"**الفرقة:** {yr}")
-                        c2.write(f"**المدفوع:** {paid}")
-                        c3.write(f"**المستحق:** {due}")
-                        
-                        st.write(f"**الباسوورد:** {row['Password']}")
+                    st.warning("لا توجد مواد مسندة إليك في الجدول (Subjects_Data). يرجى مراجعة الإدارة.")
             else:
-                st.warning("لم يتم العثور على نتائج")
+                st.error("جدول المواد (Subjects_Data) غير موجود أو فارغ.")
+                
+            st.divider()
+            if st.button("تسجيل خروج المعلم"):
+                st.session_state['logged_in_teacher'] = None
+                st.rerun()
+
+    # ------------------------- البحث -------------------------
+    elif menu == "البحث والاستعلام":
+        st.header("🔍 استعلام إداري")
+        q = st.text_input("بحث (الاسم أو الكود)")
+        if q:
+            df = get_data(sheet, "Students_Main")
+            if not df.empty:
+                df = df.astype(str)
+                res = df[df['Code'].str.contains(q, case=False) | df['Name'].str.contains(q, case=False)]
+                
+                if not res.empty:
+                    for i, r in res.iterrows():
+                        with st.expander(f"{r['Name']} - {r['Code']}"):
+                            st.write(f"الفرقة: {r['Year']}")
+                            st.write(f"المدفوع: {r['Paid_Tuition']}")
+                            st.write(f"الباسوورد: {r['Password']}")
+                else:
+                    st.warning("لا توجد نتائج")
 
 if __name__ == '__main__':
     main()
